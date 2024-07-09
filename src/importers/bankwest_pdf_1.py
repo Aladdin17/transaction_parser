@@ -1,29 +1,17 @@
 """
-File: convert_statement_to_csv.py
-Purpose: Read statement and extract transations to CSV file.
+File: bankwest_pdf_1.py
+Author: Christien Alden
+Purpose: Strategy pattern to scrape transactions from Bankwest PDF statement
+Details:
+    - Valid Statement Ranges: ?? to ??
 """
-from utils import Log
+from common.classes import Transaction, Importer
 from datetime import datetime
 from pypdf import PdfReader
 from typing import List, Tuple
-import argparse
-import csv
-import os
 import re
-import sys
 
-class Transaction:
-    def __init__(self, date : datetime = None, description : str = None, debit : float = None, credit : float = None, balance : float = None):
-        self.date = date
-        self.description = description
-        self.debit = debit
-        self.credit = credit
-        self.balance = balance
-
-    def __repr__(self):
-        return f'Transaction(date={self.date}, description={self.description}, debit={self.debit}, credit={self.credit}, balance={self.balance})'
-
-def extract_text_from_pdf(file_path : str):
+def extract_text_from_pdf(file):
     text : str = ""
     reader = PdfReader(file)
     num_pages = len(reader.pages)
@@ -76,7 +64,7 @@ def parse_single_line_transaction(transaction : str, balance : float) -> Tuple[T
     new_transaction = Transaction()
     date_regex = r'(?P<day>\d{2}) (?P<month>\w{3}) (?P<year>\d{2})'
     date_match = re.match(date_regex, transaction)
-    new_transaction.date = convert_to_date(date_match.group('day'), date_match.group('month'), date_match.group('year'))
+    new_transaction.processing_date = convert_to_date(date_match.group('day'), date_match.group('month'), date_match.group('year'))
 
     # strip the date from the transaction string
     transaction = transaction[date_match.end():].strip()
@@ -101,23 +89,21 @@ def parse_single_line_transaction(transaction : str, balance : float) -> Tuple[T
         return None, balance
 
     # populate the transaction object
-    new_transaction.description = whole_match.group('description')
+    new_transaction.narration = whole_match.group('description')
     new_transaction.balance = strip_dollar_sign(whole_match.group('balance'))
+    new_transaction.amount = strip_dollar_sign(whole_match.group('amount'))
 
-    # determine if this is a debit or credit
-    if new_transaction.balance > balance:
-        new_transaction.credit = strip_dollar_sign(whole_match.group('amount'))
-    else:
-        new_transaction.debit = strip_dollar_sign(whole_match.group('amount'))
+    # invert the amount if it is a debit
+    if new_transaction.balance < balance:
+        new_transaction.amount *= -1.0
 
     return new_transaction, new_transaction.balance
-
 
 def parse_multi_line_transaction(transaction1 : str, transaction2 : str, balance : float) -> Tuple[Transaction, float]:
     new_transaction = Transaction()
     date_regex = r'(?P<day>\d{2}) (?P<month>\w{3}) (?P<year>\d{2})'
     date_match = re.match(date_regex, transaction1)
-    new_transaction.date = convert_to_date(date_match.group('day'), date_match.group('month'), date_match.group('year'))
+    new_transaction.processing_date = convert_to_date(date_match.group('day'), date_match.group('month'), date_match.group('year'))
 
     # strip the date from the transaction string
     transaction1 = transaction1[date_match.end():].strip()
@@ -138,14 +124,13 @@ def parse_multi_line_transaction(transaction1 : str, transaction2 : str, balance
         return None, balance
 
     # populate the transaction object
-    new_transaction.description = whole_match1.group('description') + ' ' + whole_match2.group('description')
+    new_transaction.narration = whole_match1.group('description') + ' ' + whole_match2.group('description')
     new_transaction.balance = strip_dollar_sign(whole_match2.group('balance'))
+    new_transaction.amount = strip_dollar_sign(whole_match1.group('amount'))
 
-    # determine if this is a debit or credit
-    if new_transaction.balance > balance:
-        new_transaction.credit = strip_dollar_sign(whole_match1.group('amount'))
-    else:
-        new_transaction.debit = strip_dollar_sign(whole_match1.group('amount'))
+    # invert the amount if it is a debit
+    if new_transaction.balance < balance:
+        new_transaction.amount *= -1.0
 
     return new_transaction, new_transaction.balance
 
@@ -178,76 +163,30 @@ def parse_transactions(transactions : List[str]) -> List[Transaction]:
 
     return parsed_transactions
 
-def write_transactions_to_csv(transactions : List[Transaction], stream) -> None:
-    if transactions is None:
-        raise(ValueError('No transactions to write.'))
+class BankwestPDF1(Importer):
+    def extract(self, file_path) -> List[Transaction]:
+        # validate file extension
+        self.log.action(f'Validating file extension', 5)
+        if not file_path.lower().endswith('.pdf'):
+            self.log.error('File must have a PDF extension')
+            raise
+        self.log.success()
 
-    # write transactions
-    writer = csv.writer(stream, dialect = 'excel', delimiter = ',')
-    writer.writerow(['Date', 'Description', 'Debit', 'Credit', 'Balance'])
-    for transaction in transactions:
-        writer.writerow([transaction.date.strftime('%Y-%m-%d'), transaction.description, transaction.debit, transaction.credit, transaction.balance])
+        # extract text and parse it into transactions
+        self.log.action(f'Extracting text from file', 5)
+        try:
+            with open(file_path, 'rb') as file:
+                extracted_text = extract_text_from_pdf(file)
+                self.log.success()
+        except Exception as error:
+            self.log.error(error)
+            raise
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description = 'Extract transactions from PDF to CSV.'
-    )
-
-    parser.add_argument('file', type = str, help = 'Statement to extract transactions from.')
-    parser.add_argument('-o', dest = 'output', type = str, required = False, help = 'Output file.')
-    parser.add_argument('-q', dest = 'quiet', action = 'store_true', help = 'Suppress all output.')
-
-    # parse arguments setup program
-    args = parser.parse_args()
-    file_path : str = os.path.relpath(args.file)
-    log = Log(quiet = args.quiet, fill_width = 60, fill_char = '.')
-
-    # validate file extension
-    if not args.file.lower().endswith('.pdf'):
-        print('File must have a .pdf extension.', file = sys.stderr)
-        sys.exit(1)
-
-    # extract text and parse it into transactions
-    try:
-        with open(file_path, 'rb') as file:
-            log.action(f'Extracting text from \'{file_path}\'', 5)
-            extracted_text = extract_text_from_pdf(file_path)
-            log.success()
-    except Exception as e:
-        log(f'Error: {e}')
-        sys.exit(1)
-
-    # convert text to transactions
-    try:
-        log.action('Parsing transactions', 5)
+        # convert text to transactions
+        self.log.action('Parsing transactions', 5)
         extracted_transactions : List[str] = extract_transactions(extracted_text)
         parsed_transactions : List[Transaction] = parse_transactions(extracted_transactions)
-        log.success()
-    except Exception as e:
-        log('error')
-        log(f'\t{e}')
-        sys.exit(1)
+        self.log.success()
 
-    # write to stdout if no output file is specified
-    try:
-        if not args.output:
-            log(log.pad('Writing transactions to stdout', 5))
-            write_transactions_to_csv(parsed_transactions, sys.stdout)
-            sys.exit(0)
-    except Exception as e:
-        log(f'\n\t{e}')
-        sys.exit(1)
-
-    # write to file if output file is specified
-    try:
-        with open(args.output, 'w', newline = '') as stream:
-            log.action(f'Writing transactions to \'{args.output}\'', 5)
-            write_transactions_to_csv(parsed_transactions, stream)
-            log.success()
-
-            log(f'\n{len(parsed_transactions)} transactions processed.')
-            sys.exit(0)
-    except Exception as e:
-        log('error')
-        log(f'\t{e}')
-        sys.exit(1)
+        self.log(f'{len(parsed_transactions)} transactions imported')
+        return parsed_transactions
